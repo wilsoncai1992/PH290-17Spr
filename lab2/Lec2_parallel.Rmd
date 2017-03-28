@@ -1,0 +1,542 @@
+---
+title: "R for Big Data --- recent topics"
+author: 
+- Wilson Cai, Department of Biostatistics, UC Berkeley 
+- wcai@berkeley.edu
+date: "2016-02-04"
+output:
+  html_document:
+    toc: true
+    theme: journal
+    highlight: haddock
+---
+
+## I.	Parallelization
+
+### i.	Useful terminology
+-	Cores: We'll use this term to mean the different processing units available on a single node.
+- Nodes: We'll use this term to mean the different computers, each with their own distinct memory, that make up a cluster or supercomputer.
+- Processes: computational tasks executing on a machine; multiple processes may be executing at once. A given program may start up multiple processes at once. Ideally we have no more processes than cores on
+a node.
+- Threads: multiple paths of execution within a single process; the OS sees the threads as a single process, but one can think of them as 'lightweight' processes. Ideally when considering the processes and their threads, we would have no more processes and threads combined than cores on a node.
+- Forking: child processes are spawned that are identical to the parent, but with different process IDs and their own memory.
+- sockets: some of R's parallel functionality involves creating new R processes (e.g., starting processes via *Rscript*) and communicating with them via a communication technology called sockets.
+
+### ii.	shared memory v.s. distributed memory
+For shared memory parallelism, each core is accessing the same memory so there is no need to pass information (in the form of messages) between different machines. But in some programming contexts one needs to be careful that activity on different cores doesn't mistakenly overwrite places in memory that are used by other cores.
+
+---------------------
+Parallel programming for distributed memory parallelism requires passing
+messages between the different nodes. The standard protocol for doing
+this is MPI, of which there are various versions, including *openMPI*.
+
+The R package *Rmpi* implements MPI in R. The *pbd* packages for R also implement MPI as well as distributed linear algebra (linear algebra calculations across nodes). 
+
+Python has a package *mpi4py* that allows use of MPI within Python.
+
+Matlab has its own system for distributed computation, called the Distributed Computing Server (DCS), requiring additional licensing above the standard Matlab installation. 
+
+This tutorial will not cover distributed memory parallelization, though a future tutorial may. 
+
+### iii.	other types of parallel processing
+#### 1.	GPU
+
+GPUs (Graphics Processing Units) are processing units originally designed
+for rendering graphics on a computer quickly. This is done by having
+a large number of simple processing units for massively parallel calculation.
+The idea of general purpose GPU (GPGPU) computing is to exploit this
+capability for general computation. 
+
+For more information, refer to [the workshop on using GPUs](http://statistics.berkeley.edu/computing/gpu) by Chris Paciorek (Department of Statistics) in Spring 2014. 
+
+#### 2.	Spark and Hadoop
+
+Spark and Hadoop are systems for implementing computations in a distributed
+memory environment, using the MapReduce approach.
+For more information, refer to [the workshop on using Spark](http://statistics.berkeley.edu/computing/gpu) by Chris Paciorek (Department of Statistics) in Fall 2014. 
+
+## II.	Basic paralleized loops/ apply in R
+
+All of the functionality discussed here applies <FONT COLOR="red">**ONLY**</FONT> if the iterations/loops of your calculations can be done <FONT COLOR="red"> completely separately and do not depend on one another </FONT>. This scenario is called an <FONT COLOR="red">*embarrassingly parallel*</FONT> computation.  So coding up the evolution of a time series or a Markov chain is not possible using these tools. However, bootstrapping, random forests, simulation studies, cross-validation
+and many other statistical methods can be handled in this way.
+
+
+### i.	Parallel for loops with foreach
+
+A simple way to exploit parallelism in R  is to use the *foreach* package to do a for loop in parallel.
+
+The *foreach* package provides a *foreach* command that
+allows you to do this easily. *foreach* can use a variety of
+parallel ``back-ends''. For our purposes, the main one is use of the *parallel* package to use shared
+memory cores. When using *parallel* as the
+back-end, you should see multiple processes (as many as you registered;
+ideally each at 100%) when you  monitor CPU usage. The multiple processes
+are created by forking or using sockets. *foreach* can also use *Rmpi* to access cores in
+a distributed memory setting, but that is beyond the scope of this document.
+
+```{r}
+library(parallel) # one of the core R packages
+library(doParallel)
+# library(multicore); library(doMC) # alternative to parallel/doParallel
+# library(Rmpi); library(doMPI) # to use Rmpi as the back-end
+library(foreach)
+library(iterators)
+
+taskFun <- function(){
+	mn <- mean(rnorm(10000000))
+	return(mn)
+}
+nCores <- 4  # to set manually
+registerDoParallel(nCores) 
+# registerDoMC(nCores) # alternative to registerDoParallel
+# cl <- startMPIcluster(nCores); registerDoMPI(cl) # when using Rmpi as the back-end
+
+mat <- matrix(nrow = 30)
+for(i in 1:30){
+  outSub <- taskFun()
+  mat[i,] <- outSub
+}
+
+system.time(
+out <- foreach(i = 1:30, .combine = c) %dopar% {
+	cat('Starting ', i, 'th job.\n', sep = '')
+	outSub <- taskFun()
+	cat('Finishing ', i, 'th job.\n', sep = '')
+	outSub # this will become part of the out object
+}
+)
+print(out)
+```
+
+(Note that the printed statements from `cat` are not showing up in the creation of this document but should show if you run the code.)
+
+ Note that *foreach*
+also provides functionality for collecting and managing
+the results to avoid some of the bookkeeping
+you would need to do if writing your own standard for loop.
+The result of *foreach* will generally be a list, unless 
+we request the results be combined in different way, as we do here using `.combine = c`.
+
+You can debug by running serially using *%do%* rather than
+*%dopar%*. Note that you may need to load packages within the
+*foreach* construct to ensure a package is available to all of
+the calculations.
+
+
+### ii.	Parallel apply with parallel
+The *parallel* package has the ability to parallelize the various
+*apply* functions (apply, lapply, sapply, etc.). It's a bit hard to find the [vignette for the parallel package](http://stat.ethz.ch/R-manual/R-devel/library/parallel/doc/parallel.pdf)
+because parallel is not listed as one of
+the contributed packages on CRAN (it gets installed with R by default).
+
+We'll consider parallel lapply and sapply. These rely on having started a cluster using *cluster*, which  uses the PSOCK mechanism as in the SNOW package - starting new jobs via *Rscript* 
+and communicating via a technology called sockets.
+
+```{r, eval=TRUE}
+library(parallel)
+nCores <- 4  # to set manually 
+cl <- makeCluster(nCores) 
+
+nSims <- 60
+input <- seq_len(nSims) # same as 1:nSims but more robust
+taskFun <- function(i){
+	mn <- mean(rnorm(1000000))
+	return(mn)
+}
+# clusterExport(cl, c('x', 'y')) # if the processes need objects (x and y, here) from the master's workspace
+system.time(
+	res <- parSapply(cl, input, taskFun)
+)
+system.time(
+	res2 <- sapply(input, taskFun)
+)
+res <- parLapply(cl, input, taskFun)
+
+library(rbenchmark)
+benchmark({res <- parSapply(cl, input, taskFun)}, {res2 <- sapply(input, taskFun)}, replications = 5)
+```
+
+Here the miniscule user time is probably because the time spent in the worker processes is not counted at the level of the overall master process that dispatches the workers.
+
+For help with these functions and additional related parallelization functions (including *parApply*), see `help(clusterApply)`.
+
+*mclapply* is an alternative that uses forking to start up the worker processes.
+
+```{r, eval=TRUE}
+system.time(
+	res <- mclapply(input, taskFun, mc.cores = nCores) 
+)
+
+```
+
+Note that some R packages can directly interact with the parallelization
+packages to work with multiple cores. E.g., the *boot* package
+can make use of the *parallel* package directly. 
+
+
+## III.	*data.table*
+
+In many cases, particularly on a machine with a lot of memory, R might be able to read the dataset into memory but computations with the dataset may be slow.
+The *data.table* package provides a lot of functionality for fast manipulation: indexing, merges/joins, assignment, grouping, etc.
+Let’s read in the airline dataset, specifying the column classes so that *fread()* doesn’t have to detect what they are. I’ll also use factors since factors are represented numerically. It only takes about 5 minutes to read the data in. We’ll see in the next section that this is much faster than with other approaches within R.
+
+Airline data (https://www.ocf.berkeley.edu/~wcai/share/airlines/AirlineDataAll.csv)
+
+- 123534969 observations
+- 29 covariates
+
+```{r, eval=FALSE}
+require(data.table)
+fileName <- './airlines/AirlineDataAll.csv'
+
+system.time(
+  dt <- read.csv(fileName, colClasses=c(rep("numeric", 8), "factor",
+                            "numeric", "factor", rep("numeric", 5),
+                            rep("factor", 2), rep("numeric", 4),
+                            "factor", rep("numeric", 6)))
+)
+
+system.time(
+dt <- fread(fileName, colClasses=c(rep("numeric", 8), "factor",
+                            "numeric", "factor", rep("numeric", 5),
+                            rep("factor", 2), rep("numeric", 4),
+                            "factor", rep("numeric", 6)))
+)
+#Read 123534969 rows and 29 (of 29) columns from
+#    11.203 GB file in 00:05:16
+
+dt
+
+class(dt)
+# [1] "data.table" "data.frame"
+```
+
+Now let’s do some basic subsetting. We’ll see that setting a key and using binary search can improve lookup speed dramatically.
+
+
+```{r, eval=FALSE}
+system.time(sfo <- subset(dt, Origin == "SFO"))
+## 8.8 seconds 
+system.time(sfoShort <- subset(dt, Origin == "SFO" & Distance < 1000))
+## 12.7 seconds
+
+system.time(setkey(dt, Origin, Distance))
+## 33 seconds:
+## takes some time, but will speed up later operations
+tables()
+##     NAME            NROW    MB
+##[1,] dt       123,534,969 27334
+##[2,] sfo        2,733,910   606
+##[3,] sfoShort   1,707,171   379
+##     COLS                                                                            
+##[1,] Year,Month,DayofMonth,DayOfWeek,DepTime,CRSDepTime,ArrTime,CRSArrTime,UniqueCarr
+##[2,] Year,Month,DayofMonth,DayOfWeek,DepTime,CRSDepTime,ArrTime,CRSArrTime,UniqueCarr
+##[3,] Year,Month,DayofMonth,DayOfWeek,DepTime,CRSDepTime,ArrTime,CRSArrTime,UniqueCarr
+##     KEY            
+##[1,] Origin,Distance
+##[2,]                
+##[3,]                
+##Total: 28,319MB
+
+## vector scan
+system.time(sfo <- subset(dt, Origin == "SFO"))
+## 8.5 seconds
+system.time(sfoShort <- subset(dt, Origin == "SFO" & Distance < 1000 ))
+## 12.4 seconds
+
+## binary search
+system.time(sfo <- dt[.('SFO'), ])
+## 0.8 seconds
+```
+
+Setting a key in *data.table* simply amounts to sorting based on the columns provided, which allows for fast lookup later using binary search algorithms, as seen with the last query. Think about the analogy of looking up by name vs. index. From my fairly quick look through the *data.table* documentation I don’t see a way to do the subsetting with distance less than 1000 using the specialized functionality of *data.table*.
+
+
+There’s a bunch more to *data.table* and you’ll have to learn a modest amount of new syntax, but if you’re working with large datasets in memory, it will probably be well worth your while. Plus *data.table* objects are data frames (i.e., they inherit from data frames) so they are compatible with R code that uses dataframes.
+
+### A note on hashing
+
+![](./hash_phone.png)
+
+
+A hash function is a function that takes as input some data and maps it to a fixed-length output that can be used as a shortened reference to the data. We’ve seen this in the context of git commits where each commit was labeled with a long base-16 number. This also comes up when verifying files on the Internet. You can compute the hash value on the file you get and check that it is the same as the hash value associated with the legitimate copy of the file.
+
+
+For our purposes here, hashing can allow one to look up values by their name via a hash table. The idea is that you have a set of key-value pairs (sometimes called a dictionary) where the key is the name associated with the value and the value is some arbitrary object. Hashing allows one to quickly determine an index associated with the key and therefore quickly find the relevant value based on the index. For example, one approach is to compute the hash as a function of the key and then take the remainder when dividing by the number of key-value pairs to get the index. Here’s the procedure in pseudocode:
+
+
+```{r, eval=FALSE}
+hash = hashfunc(key)
+index = hash %% array_size # %% is modulo operator - it gives the remainder
+```
+
+In general, there will be collisions, with multiple keys assigned to the same index, but usually there will be a small number of keys associated with a given index or slot, and determining the correct value within a given index/slot (also called a bucket) is fast. Put another way, the hash function distributes the keys amongst an array of buckets and allows one to look up the appropriate bucket quickly based on the computed index value. When the hash table is properly set up, the cost of looking up a value does not depend on the number of key-value pairs stored.
+
+
+## IV.	*dplyr*
+
+The *dplyr* package is the successor to the *plyr* package, providing *plyr* type functionality for data frames with enhancements for working with large tables and accessing databases (among other things). With *dplyr* one can work with data stored in the *data.table* format and in external databases.
+
+```{r, eval=FALSE}
+library(dplyr)
+# with database
+cis <- src_sqlite("/tmp/cis.db")
+authors <- tbl(cis, "authors") 
+authors
+
+# with data.table
+fileName <- './airlines/AirlineDataAll.csv'
+flights <- tbl_dt(fread(fileName, colClasses=c(rep("numeric", 8), "factor",
+                            "numeric", "factor", rep("numeric", 5),
+                            rep("factor", 2), rep("numeric", 4),
+                            "factor", rep("numeric", 6))))
+
+# now use dplyr functionality on 'authors' or 'flights'
+# example analysis
+summarize(group_by(flights, UniqueCarrier), mean(DepDelay, na.rm=TRUE))
+
+group_by(flights, UniqueCarrier) %>% summarize(mean(DepDelay, na.rm=TRUE))
+# Source: local data table [29 x 2]
+#
+#   UniqueCarrier mean(DepDelay, na.rm = TRUE)
+#1             PS                     8.928104
+#2             TW                     7.658251
+#3             UA                     9.667930
+#4             WN                     9.077167
+#5             EA                     8.674051
+#6             HP                     8.107790
+#7             NW                     6.007974
+#8         PA (1)                     5.532442
+#9             PI                     9.560336
+#10            CO                     7.695967
+#..           ...                          ...
+```
+
+
+## V.	*ff*, *bigmemory* and *sqldf*
+
+### *ff*
+
+Now we can read the data into R using the *ff* package, in particular reading in as an *ffdf* object. Note the arguments are similar to those for *read.{table,csv}()*. *read.table.ffdf()* reads the data in chunks.
+
+```{r, eval=FALSE}
+require(ff)
+require(ffbase)
+
+# I put the data file on local disk on the machine I am using
+# it's good to test with a small subset before
+# doing the full operations
+fileName <- '/tmp/test.csv'
+dat <- read.csv.ffdf(file = fileName, header = TRUE,
+     colClasses = c('integer', rep('factor', 3),
+     rep('integer', 4), 'factor', 'integer', 'factor',
+     rep('integer', 5), 'factor','factor', rep('integer', 4),
+     'factor', rep('integer', 6)))
+
+
+fileName <- './airlines/AirlineDataAll.csv'
+system.time(  dat <- read.csv.ffdf(file = fileName, header = TRUE,
+    colClasses = c('integer', rep('factor', 3), rep('integer', 4),
+    'factor', 'integer', 'factor', rep('integer', 5), 'factor',
+    'factor', rep('integer', 4), 'factor', rep('integer', 6))) )
+## takes about 22 minutes
+
+system.time(ffsave(dat, file = './airlines/AirlineDataAll'))
+## takes 11 minutes
+## file is saved (in a binary format) as AirlineDataAll.ffData
+## with metadata in AirlineDataAll.RData
+
+rm(dat) # pretend we are in a new R session
+
+system.time(ffload('./airlines/AirlineDataAll'))
+# this is much quicker:
+# 107 seconds
+```
+
+
+In the above operations, we wrote a copy of the file in the *ff* binary format that can be read more quickly back into R than the original reading of the CSV using *ffsave()* and *ffload()*. Also note the reduced size of the binary format file compared to the original CSV. It’s good to be aware of where the binary *ff* file is stored given that for large datasets, it will be large. With *ff* (I think bigmemory is *different* in how it handles this) it appears to be stored in /tmp in an R temporary directory. Note that as we work with large files we need to be more aware of the filesystem, making sure in this case that /tmp has enough space.
+Let’s look at the *ff* and *ffbase* packages to see what functions are available using library(help=ff). Notice that there is an *merge.ff()*.
+Note that a copy of an *ff* object appears to be a shallow copy.
+Next let’s do a bit of exploration of the dataset. Of course in a real analysis we’d do a lot more and some of this would take some time.
+
+```{r, eval=FALSE}
+ffload('./airlines/AirlineDataAll')
+# [1] "tmp/RtmpU5Uw6z/ffdf4e684aecd7c4.ff" "tmp/RtmpU5Uw6z/ffdf4e687fb73a88.ff"
+# [3] "tmp/RtmpU5Uw6z/ffdf4e6862b1033f.ff" "tmp/RtmpU5Uw6z/ffdf4e6820053932.ff"
+# [5] "tmp/RtmpU5Uw6z/ffdf4e681e7d2235.ff" "tmp/RtmpU5Uw6z/ffdf4e686aa01c8.ff"
+# ...
+
+dat$Dest
+# ff (closed) integer length=123534969 (123534969) levels: BUR LAS LAX OAK PDX RNO SAN SFO SJC SNA
+# ABE ABQ ACV ALB ALO AMA ANC ATL AUS AVP AZO BDL BFL BGR BHM BIL BLI BNA BOI BOS BTV BUF BWI CAE
+# CAK CCR CHS CID CLE CLT CMH CMI COS CPR CRP CRW CVG DAB DAL DAY DCA DEN DFW DLH DRO DSM DTW ELP
+# EUG EVV EWR FAI FAR FAT FLG FLL FOE FSD GCN GEG GJT GRR GSO GSP GTF HNL HOU HPN HRL HSV IAD IAH
+# ICT ILG ILM IND ISP JAN JAX JFK KOA LBB LEX LGA LGB LIH LIT LMT LNK MAF MBS MCI MCO MDT MDW MEM
+# MFR MHT MIA MKE MLB MLI MOB MRY MSN MSP MSY OGG OKC OMA ONT ORD ORF PBI PHL PHX PIA PIT PNS PSC
+# ...
+
+# let's do some basic tabulation
+DestTable <- sort(table.ff(dat$Dest), decreasing = TRUE)
+# why do I need to call table.ff() and not table()?
+
+# takes a while
+
+#    ORD     ATL     DFW     LAX     PHX     DEN     DTW     IAH     MSP     SFO
+
+# 6638035 6094186 5745593 4086930 3497764 3335222 2997138 2889971 2765191 2725676
+
+#    STL     EWR     LAS     CLT     LGA     BOS     PHL     PIT     SLC     SEA
+
+#  2720250 2708414 2629198 2553157 2292800 2287186 2162968 2079567 2004414 1983464 
+
+# looks right - the busiest airports are ORD (O'Hare in Chicago) and ATL (Atlanta)
+
+dat$DepDelay[1:50]
+#opening ff /tmp/RtmpU5Uw6z/ffdf4e682d8cd893.ff
+#  [1] 11 -1 11 -1 19 -2 -2  1 14 -1  5 16 17  1 21  3 13 -1 87 19 31 17 32  0  1
+# [26] 29 26 15  5 54  0 25 -2  0 12 14 -1  2  1 16 15 44 20 15  3 21 -1  0  7 23
+
+min.ff(dat$DepDelay, na.rm = TRUE)
+# [1] -1410
+max.ff(dat$DepDelay, na.rm = TRUE)
+# [1] 2601
+
+# tmp <- clone(dat$DepDelay) # make a deep copy
+```
+
+
+
+Let’s review our understanding of S3 methods. Why did I need to call *table.ff()* rather than just simply calling *table()* on the *ff* object?
+A note of caution. Debugging code involving *ff* can be a hassle because the size gets in the way in various ways. Until you’re familiar with the various operations on *ff* objects, you’d be wise to try to run your code on a small test dataset loaded in as an *ff* object. Also, we want to be sure that the operations we use keep any resulting large objects in the *ff* format and use *ff* methods and not standard R functions.
+
+### *bigmemory*
+
+The *bigmemory* package is an alternative way to work with datasets in R that are kept stored on disk rather than read entirely into memory. *bigmemory* provides a *big.matrix* class, so it appears to be limited to datasets with a single type for all the variables. However, one nice feature is that one can use *big.matrix* objects with *foreach* without passing a copy of the matrix to each worker. Rather the workers can access the matrix stored on disk.
+
+### *sqldf*
+
+The *sqldf* package provides the ability to use SQL queries on data frames (via *sqldf()*) as well as to filter an input CSV via an SQL query (via *read.csv.sql()*), with only the result of the subsetting put in memory in R. The full input data can be stored temporarily in an SQLite database on disk.
+
+```{r, eval=FALSE}
+require(sqldf)
+# read in file, with temporary database in memory
+system.time(sfo <- read.csv.sql(fn,
+      sql = "select * from file where Origin = 'SFO'",
+      dbname=NULL, header = TRUE))
+# read in file, with temporary database on disk
+system.time(sfo <- read.csv.sql(fn,
+      sql = "select * from file where Origin = 'SFO'",
+      dbname=tempfile(), header = TRUE))
+
+```
+
+
+## VI.	*biglm* 
+
+The *biglm* package provides the ability to fit large linear models and GLMs. ffbase has a *bigglm.ffdf()* function that builds on *biglm* for use with *ffdf* objects. Let’s fit a basic model on the airline data. Note that we’ll also fit the same model on the dataset when we use Spark at the end of the Unit.
+
+```{r, eval=FALSE}
+require(ffbase)
+require(biglm)
+
+datUse <- subset(dat, ArrDelay < 60*12 & ArrDelay > (-30) &
+                 !is.na(ArrDelay) & !is.na(Distance) & !is.na(DayOfWeek))
+datUse$Distance <- datUse$Distance / 1000  # helps stabilize numerics
+# 119971791 records
+
+# any concern about my model?
+system.time(mod <- bigglm(ArrDelay ~ Distance + DayOfWeek, data = datUse))
+# 542.149  11.248 550.779
+summary(mod)
+
+coef <- summary(mod)$mat[,1]
+```
+
+
+Here are the results. Day 1 is Monday, so that’s the baseline category for the ANOVA-like part of the model.
+
+```{r, eval=FALSE}
+## Large data regression model: bigglm(DepDelay ~ Distance + DayOfWeek, data =
+## Sample size =  119971791
+##                Coef    (95%     CI)     SE p
+## (Intercept)  6.3662  6.3504  6.3820 0.0079 0
+## Distance     0.7638  0.7538  0.7737 0.0050 0
+## DayOfWeek2  -0.6996 -0.7197 -0.6794 0.0101 0
+## DayOfWeek3   0.3928  0.3727  0.4129 0.0101 0
+## DayOfWeek4   2.2247  2.2046  2.2449 0.0101 0
+## DayOfWeek5   2.8867  2.8666  2.9068 0.0101 0
+## DayOfWeek6  -2.4273 -2.4481 -2.4064 0.0104 0
+## DayOfWeek7  -0.1362 -0.1566 -0.1158 0.0102 0
+```
+
+
+
+Of course as good statisticians/data analysts we want to do careful assessment of our model, consideration of alternative models, etc. This is going to be harder to do with large datasets than with more manageable ones. However, one possibility is to do the diagnostic work on subsamples of the data.
+Now let’s consider the fact that very small substantive effects can be highly statistically sig- nificant when estimated from a large dataset. In this analysis the data are generated from $Y \sim N (0 + 0.001x, 1)$, so the $R^2$ is essentially zero.
+
+```{r, eval=FALSE}
+n <- 150000000  # n*4*8/1e6 Mb of RAM (~5 Gb)
+# but turns out to be 11 Gb as a text file
+nChunks <- 100
+chunkSize <- n/nChunks
+
+set.seed(0)
+
+for(p in 1:nChunks) {
+  x1 <- runif(chunkSize)
+  x2 <- runif(chunkSize)
+  x3 <- runif(chunkSize)
+  y <- rnorm(chunkSize, .001*x1, 1)
+  write.table(cbind(y,x1,x2,x3), file = '/tmp/signif.csv',
+     sep = ',', col.names = FALSE,  row.names = FALSE,
+     append = TRUE, quote = FALSE)
+}
+
+
+fileName <- '/tmp/signif.csv'
+system.time(  dat <- read.csv.ffdf(file = fileName,
+   header = FALSE, colClasses = rep('numeric', 4)))
+# 922.213  18.265 951.204 -- timing is on an older machine than radagast
+
+names(dat) <- c('y', 'x1','x2', 'x3')
+ffsave(dat, file = '/tmp/signif')
+```
+
+```{r, eval=FALSE}
+system.time(ffload('/tmp/signif'))
+# 52.323   7.856  60.802  -- timing is on an older machine
+
+system.time(mod <- bigglm(y ~ x1 + x2 + x3, data = dat))
+#  1957.358    8.900 1966.644  -- timing is on an older machine
+
+options(digits = 12)
+summary(mod)
+
+
+# R^2 on a subset (why can it be negative?)
+coefs <- summary(mod)$mat[,1]
+wh <- 1:1000000
+1 - sum((dat$y[wh] - coefs[1] + coefs[2]*dat$x1[wh] +
+  coefs[3]*dat$x2[wh] + coefs[4]*dat$x3[wh])^2) /
+  sum((dat$y[wh] - mean(dat$y[wh]))^2)
+```
+
+
+Here are the results:
+
+```{r,eval=FALSE}
+## Large data regression model: bigglm(y ~ x1 + x2 + x3, data = dat)
+## Sample size = 1.5e+08
+##               Coef         (95%       CI)          SE         p
+## (Intercept) -0.0001437 -0.0006601 0.0003727 0.0002582 0.5777919
+## x1           0.0013703  0.0008047 0.0019360 0.0002828 0.0000013
+## x2           0.0002371 -0.0003286 0.0008028 0.0002828 0.4018565
+## x3          -0.0002620 -0.0008277 0.0003037 0.0002829 0.3542728
+## ### and here is the R^2 calculation (why can it be negative?)
+## [1] -1.111046828e-06
+```
+
+
+
+
+So, do I care the result is highly significant? Perhaps if I’m hunting the Higgs boson... As you have hopefully seen in statistics courses, statistical significance $\ne$ practical significance.

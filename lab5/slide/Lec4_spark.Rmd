@@ -1,0 +1,386 @@
+---
+title: "Distributed file system"
+author:
+- Wilson Cai, Department of Biostatistics, UC Berkeley
+- wcai@berkeley.edu
+date: "2016-04-07"
+output:
+  html_document:
+    toc: true
+    theme: journal
+    highlight: haddock
+---
+
+## 1 Hadoop, MapReduce, and Spark
+
+Here we’ll talk about a fairly recent development in parallel computing. Traditionally, high-performance computing (HPC) has concentrated on techniques and tools for message passing such as MPI and on developing efficient algorithms to use these techniques.
+
+
+
+### 1.1 Overview
+
+A basic paradigm for working with big datasets is the MapReduce paradigm. The basic idea is to store the data in a distributed fashion across multiple nodes and try to do the computation in pieces on the data on each node. Results can also be stored in a distributed fashion.
+
+A key benefit of this is that if you can’t fit your dataset on disk on one machine you can on a cluster of machines. And your processing of the dataset can happen in parallel. This is the basic idea of MapReduce.
+The basic steps of MapReduce are as follows:
+
+* read individual data objects (e.g., records/lines from CSVs or individual data files)
+
+* map: create key-value pairs using the inputs (more formally, the map step takes a key-value pair and returns a new key-value pair)
+
+* reduce - for each key, do an operation on the associated values and create a result - i.e., aggregate within the values assigned to each key
+
+* write out the {key,result} pair
+
+A similar paradigm that is being implemented in some R packages by Hadley Wickham is the split-apply-combine strategy (http://www.jstatsoft.org/v40/i01/paper).
+
+Hadoop is an infrastructure for enabling MapReduce across a network of machines. The basic idea is to hide the complexity of distributing the calculations and collecting results. Hadoop includes a file system for distributed storage (HDFS), where each piece of information is stored redundantly (on multiple machines). Calculations can then be done in a parallel fashion, often on data in place on each machine thereby limiting the amount of communication that has to be done over the network. Hadoop also monitors completion of tasks and if a node fails, it will redo the relevant tasks on another node. Hadoop is based on Java but there are projects that allow R to interact with Hadoop, in particular RHadoop and RHipe. Rhadoop provides the rmr, rhdfs, and rhbase packages. For more details on RHadoop see Adler and http://blog.revolutionanalytics.com/2011/09/mapreduce-hadoop-r.html.
+
+Setting up a Hadoop cluster can be tricky. Hopefully if you’re in a position to need to use Hadoop, it will be set up for you and you will be interacting with it as a user/data analyst.
+Ok, so what is Spark? You can think of Spark as in-memory Hadoop. Spark allows one to treat the memory across multiple nodes as a big pool of memory. So just as data.table was faster than ff because we kept everything in memory, Spark should be faster than Hadoop when the data will fit in the collective memory of multiple nodes. In cases where it does not, Spark will make use of the HDFS.
+
+
+### 1.2 MapReduce and RHadoop
+
+Let’s see some examples of the MapReduce approach using R syntax of the sort one would use with RHadoop. While we’ll use R syntax in the second piece of code below, the basic idea of what the map and reduce functions are is not specific to R. Note that using Hadoop with R may be rather slower than actually writing Java code for Hadoop.
+
+First, let’s consider a basic word-counting example. Suppose we have many, many individual text documents distributed as individual files in the HDFS. Here’s pseudo code from Wikipedia. Here in the map function, the input {key,value} pair is the name of a document and the words in the document and the output {key, value} pairs are each word and the value 1. Then the reduce function takes each key (i.e., each word) and counts up the number of ones. The output {key, value} pair from the reduce step is the word and the count for that word.
+
+```{eval=FALSE}
+function map(String name, String document):
+// name (key): document name
+// document (value): document contents
+   for each word w in document:
+   		return (w, 1)
+
+function reduce(String word, Iterator partialCounts):
+// word (key): a word
+// partialCounts (values): a list of aggregated partial counts
+	sum = 0
+	for each pc in partialCounts:
+  	 sum += pc
+	return (word, sum)
+```
+
+Now let’s consider an example where we calculate mean and standard deviation for the income of individuals in each state. Assume we have a large collection of CSVs, with each row containing information on an individual. mapreduce() and keyval() are functions in the RHadoop package. I’ll assume we’ve written a separate helper function, my_readline(), that manipulates individual lines from the CSVs.
+
+```{r, eval=FALSE}
+library(rmr)
+mymap <- function(k, v) {
+	record <- my_readline(v)
+	key <- record[['state']]
+	value <- record[['income']] keyval(key, value)
+}
+myreduce <- function(k, v){
+	keyval(k, c(length(v), mean(v), sd(v)))
+}
+incomeResults <- mapreduce( input = "incomeData", map = mymap,
+														reduce = myreduce, combine = NULL,
+														input.format = 'csv', output.format = 'csv')
+from.dfs(incomeResults, format = 'csv', structured = TRUE)
+```
+
+
+A few additional comments. In our map function, we could exclude values or transform them in some way, including producing multiple records from a single record. And in our reduce function, we can do more complicated analysis. So one can actually do fairly sophisticated things within what may seem like a restrictive paradigm. But we are constrained such that in the map step, each record needs to be treated independently and in the reduce step each key needs to be treated independently. This allows for the parallelization.
+
+![image](../sandwich_MR.png)
+
+### 1.3 Spark
+
+We’ll focus on Spark rather than Hadoop for the speed reasons described above and because I think Spark provides a very nice environment in which to work. Plus it comes out of the AmpLab here at Berkeley. One downside is we’ll have to know a bit of Python to use it.
+
+#### 1.3.1 Getting set up on Spark and the HDFS
+
+
+We’ll use Spark on an Amazon EC2 virtual cluster. Thankfully, Spark provides a Python-based script for setting up such a cluster. Occasionally the setup process goes awry but usually it’s pretty easy. We need our Amazon authentication keys as well as public-private keypair for SSH. **Make sure you don’t hard code your Amazon key information into any public file (including Github public repositories) - hackers will find the keys and use them to spin up instances, probably to mine bitcoin or send Spam.**
+
+We start by downloading the Spark package [https://spark.apache.org/downloads.html] as a .tgz file (choosing the “source code” option) and untarring/zipping it. This all works from the VM. Also, on the SCF it’s available on the Linux machines at /usr/local/src/pd/spark-1.4.0/spark-1.4.0/ec2.
+
+```{engine=bash, eval=FALSE}
+export SPARK_VERSION=1.5.1
+export NUMBER_OF_WORKERS=12  # number of slave nodes
+export mycluster=sparkvm-wcai # need unique name relative to other user
+
+# I unzipped the Spark tarball to /usr/lib/spark via sudo on BCE
+cd /usr/lib/spark/ec2
+
+# set Amazon secret keys (manually or in my case by querying them elsewhere
+export AWS_ACCESS_KEY_ID=`grep aws_access_key_id wilson.boto | cut -d' ' -f3`
+export AWS_SECRET_ACCESS_KEY=`grep aws_secret_access_key wilson.boto | cut -d' ' -f3`
+
+### DO NOT HARD CODE YOUR AMAZON SECRET KEY INFORMATION INTO ANY PUBLIC FILE ###
+
+./spark-ec2 -k wcai-key-pair-uswest2 -i ~/.ssh/wcai-key-pair-uswest2.pem --region=us-west-2 -s ${NUMBER_OF_WORKERS} -v $SPARK_VERSION launch sparkvm-wcai
+
+# Login SPARK
+./spark-ec2 -k wcai-key-pair-uswest2 -i ~/.ssh/wcai-key-pair-uswest2.pem --region=us-west-2 login sparkvm-wcai
+
+
+# you can check your nodes via the EC2 management console
+# to logon to one of the slaves, look at /root/ephemeral-hdfs/conf/slaves
+# and ssh to that address
+ssh `head -n 1 /root/ephemeral-hdfs/conf/slaves`
+
+# We can view system status through a web browser interface
+# on master node of the EC2 cluster, do:
+MASTER_IP=`cat /root/ephemeral-hdfs/conf/masters`
+echo ${MASTER_IP}
+
+# Point a browser on your own machine to the result of the next command
+# you'll see info about the "Spark Master", i.e., the cluster overall
+echo "http://${MASTER_IP}:8080/"
+
+# Point a browser on your own machine to the result of the next command
+# you'll see info about the "Spark Stages", i.e., the status of Spark tasks
+echo "http://${MASTER_IP}:4040/"
+
+# Point a browser on your own machine to the result of the next command
+# you'll see info about the HDFS"
+echo "http://${MASTER_IP}:50070/"
+
+# when you are done and want to shutdown the cluster:
+#  IMPORTANT to avoid extra charges!!!
+./spark-ec2 --region=us-west-2 destroy ${mycluster}
+```
+
+Next let’s get the airline dataset onto the master node and then into the HDFS. Note that the file system commands are like standard UNIX commands, but you need to do `hadoop fs -` in front of the command. At the end of this chunk we’ll start the Python interface for Spark.
+
+#### 1.3.2 Using Spark for pre-processing
+
+Now we’ll do some basic manipulations with the airline dataset. We’ll count the number of lines/observations in our dataset. Then we’ll do a map-reduce calculation that involves counting the number of flights by airline, so airline will serve as the key.
+
+Note that all of the various operations are OOP methods applied to either the SparkContext management object or to a Spark dataset, called a Resilient Distributed Dataset (RDD). Here lines and output are both RDDs. However the result of collect() is just a standard Python object.
+
+In the last step, let’s compare how long it took to grab the SFO subset relative to the performance of R earlier in this Unit.
+
+```{python, eval=FALSE}
+from operator import add
+import numpy as np
+
+lines = sc.textFile('/data/airline').cache()
+numLines = lines.count()
+
+# particularly for in-class demo - good to repartition the 3 files to more partitions
+# lines = lines.repartition(96).cache()
+
+# mapper
+def stratify(line):
+    vals = line.split(',')
+    return(vals[16], 1)
+
+result = lines.map(stratify).reduceByKey(add).collect()
+# reducer is simply the addition function
+
+# >>> result
+#[(u'Origin', 22), (u'CIC', 7281), (u'LAN', 67897), (u'LNY', 289), (u'DAB', 86656), (u'APF', 4074), (u'ATL', 6100953), (u'BIL', 92503), (u'JAN', 190044), (u'GTR', 7520), (u'ISO', 5945), (u'SEA', 1984077), (u'PIT', 2072303), (u'ONT', 774679), (u'ROW', 1196), (u'PWM', 161602), (u'FAY', 44564), (u'SAN', 1546835), (u'ADK', 589), (u'ADQ', 10327), (u'IAD', 1336957), (u'ANI', 475), (u'CHO', 19324), (u'HRL', 116018), (u'ACV', 23782), (u'DAY', 380459), (u'ROA', 69361), (u'VIS', 1993), (u'PSC', 38408), (u'MDW', 1170344), (u'MRY', 67926), (u'MCO', 1967493), (u'EKO', 12808), (u'RNO', 510023), (u'TPA', 1321652), (u'OME', 21403), (u'DAL', 952216), (u'GJT', 34921), (u'ALB', 292764), (u'SJT', 16590), (u'CAK', 80821), (u'TUP', 1971), (u'MKG', 396), (u'DEN', 3319905), (u'MDT', 167293), (u'RKS', 954), (u'GSP', 200147), (u'LAW', 18019), (u'MCN', 7203), (u'PIA', 44780), (u'ROC', 368099), (u'BQK', 6934), (u'MSP', 2754997), (u'ACT', 21081), (u'SBA', 119959), (u'HPN', 125500), (u'RFD', 1560), (u'CCR', 4465), (u'BWI', 1717380), (u'SJU', 461019), (u'SAV', 185855), (u'HOU', 1205951), (u'BPT', 8452), (u'RDU', 103678 ....
+
+# this counting by key could have been done
+# more easily using countByKey()
+
+vals = [x[1] for x in result]
+sum(vals) == numLines  # a bit of a check
+# True
+[x[1] for x in result if x[0] == "SFO"]  # SFO result
+# [2733910]
+
+# if don't collect, can grab a few results
+output = lines.map(stratify).reduceByKey(add)
+output.take(5)
+#[(u'Origin', 22), (u'CIC', 7281), (u'LAN', 67897), (u'LNY', 289), (u'DAB', 86656)]
+
+# also, you can have interim results stored as objects
+mapped = lines.map(stratify)
+result = mapped.reduceByKey(add).collect()
+
+
+lines.filter(lambda line: "SFO" in line.split(',')[16]).saveAsTextFile('/data/airline-SFO')
+
+## make sure it's all in one chunk for easier manipulation on master
+lines.filter(lambda line: "SFO" in line.split(',')[16]).repartition(1).saveAsTextFile('/data/airline-SFO2')
+#lines.filter(lambda line: "SFO" in line.split(',')[16]).repartition(1).
+#saveAsTextFile('/data/airline-SFO2')
+```
+
+Let’s consider some of the core methods we used. The Spark programming guide discusses these and a number of others.
+
+* map(): take an RDD and apply a function to each element, returning an RDD
+
+* reduce() and reduceByKey(): take an RDD and apply a reduction operation to the elements, doing the reduction stratified by the key values for reduceByKey(). Reduction functions need to be associative and commutative and take 2 arguments and return 1, all so that they can be done in parallel in a straightforward way.
+
+* filter(): create a subset
+
+* collect(): collect results back to the master
+
+* cache(): tell Spark to keep the RDD in memory for later use
+
+* repartition(): rework the RDD so it is in the specified number of chunks
+
+Question: how many chunks do you think we want the RDD split into? What might the tradeoffs be?
+
+Here’s an example where we don’t have a simple commutative/associative reducer function. Instead we group all the observations for each key into a so-called iterable object. Then our second map function treats each key as an element, iterating over the observations grouped within each key.
+```{python, eval=FALSE}
+def computeKeyValue(line):
+    vals = line.split(',')
+    # key is carrier-month-origin-destination
+    keyVals = '-'.join([vals[x] for x in [8,1,16,17]])
+    if vals[0] == 'Year':
+        return('0', [0,0,1,1])
+    cnt1 = 1
+    cnt2 = 1
+    # 14 and 15 are arrival and departure delays
+    if vals[14] == 'NA':
+        vals[14] = '0'
+        cnt1 = 0
+    if vals[15] == 'NA':
+        vals[15] = '0'
+        cnt2 = 0
+    return(keyVals, [int(vals[14]), int(vals[15]), cnt1, cnt2])
+
+
+def medianFun(input):
+    if len(input) == 2:  # input[0] should be key and input[1] set of values
+        if len(input[1]) > 0:
+            # iterate over set of values
+            # input[1][i][0] is arrival delay
+            # input[1][i][1] is departure delay
+            m1 = np.median([val[0] for val in input[1] if val[2] == 1])
+            m2 = np.median([val[1] for val in input[1] if val[3] == 1])
+            return((input[0], m1, m2)) # m1, m2))
+        else:
+            return((input[0], -999, -999))
+    else:
+        return((input[0], -9999, -9999))
+
+
+output = lines.map(computeKeyValue).groupByKey().cache()
+medianResults = output.map(medianFun).collect()
+medianResults[0:5]
+# [(u'DL-8-PHL-LAX', 85.0, 108.0), (u'OO-12-IAH-CLL', -6.0, 0.0), (u'AA-4-LAS-JFK', 2.0, 0.0), (u'WN-8-SEA-GEG', 0.0, 0.0), (u'MQ-1-ORD-MDT', 3.0, 1.0)]
+```
+
+#### 1.3.3 Using Spark for fitting models
+
+Here we’ll see the use of Spark to fit basic regression models in two ways. Warning: there may well be better algorithms to use and there may be better ways to implement these algorithms in Spark. But these work and give you the idea of how you can implement fitting within the constraints of a map-reduce paradigm.
+
+Note that my first step is to repartition the data for better computational efficiency. Instead of having the data split into 22 year-specific chunks that vary in size (which is how things are initially because of the initial file structure), I’m going to split into a larger number of equal-size chunks to get better load-balancing.
+
+##### Linear regression via sufficient statistics
+
+In the first algorithm we actually compute the suf- ficient statistics, which are simply $X^TX$ and $X^TY$ . Because the number of predictors is small, these are miniscule compared to the size of the dataset. This code has two ways of computing the matrices. The first treats each line as an observation and sums the Xi>Xi and XiYi values across all observations. The second uses a map function that can operate on an entire partition, iterating through the elements of the partition, and computing Xk>Xk and Xk>Yk for each partition, k. The second way is rather faster.
+
+```{python, eval=FALSE}
+lines = sc.textFile('/data/airline')
+
+def screen(vals):
+    vals = vals.split(',')
+    return(vals[0] != 'Year' and vals[14] != 'NA' and 
+           vals[18] != 'NA' and vals[3] != 'NA' and
+           float(vals[14]) < 720 and float(vals[14]) > (-30) )
+# 0 field is Year
+# 14 field is ArrDelay
+# 18 field is Distance
+# 3 field is DayOfWeek
+
+lines = lines.filter(screen).repartition(192).cache()
+# 192 is a multiple of the total number of cores: 24 (12 nodes * 2 cores/node)
+
+n = lines.count()
+
+import numpy as np
+from operator import add
+
+P = 8
+bc = sc.broadcast(P)
+
+#######################
+# calc xtx and xty
+#######################
+def crossprod(line):
+    vals = line.split(',')
+    y = float(vals[14])
+    dist = float(vals[18])
+    dayOfWeek = int(vals[3])
+    xVec = np.array([0.0] * P)
+    xVec[0] = 1.0
+    xVec[1] = float(dist)/1000
+    if dayOfWeek > 1:
+        xVec[dayOfWeek] = 1.0
+    xtx = np.outer(xVec, xVec)
+    xty = xVec * y
+    return(np.c_[xtx, xty])
+
+xtxy = lines.map(crossprod).reduce(add)
+# 11 minutes
+
+# now just solve system of linear equations!!
+
+#######################
+# calc xtx and xty w/ mapPartitions
+#######################
+
+# dealing with x matrix via mapPartitions
+
+def readPointBatch(iterator):
+    strs = list(iterator)
+    matrix = np.zeros((len(strs), P+1))
+    for i in xrange(len(strs)):
+        vals = strs[i].split(',')
+        dist = float(vals[18])
+        dayOfWeek = int(vals[3])
+        xVec = np.array([0.0] * (P+1))
+        xVec[8] = float(vals[14]) # y
+        xVec[0] = 1.0  # int
+        xVec[1] = float(dist) / 1000
+        if(dayOfWeek > 1):
+            xVec[dayOfWeek] = 1.0
+        matrix[i] = xVec
+    return([matrix.T.dot(matrix)])
+
+xtxyBatched = lines.mapPartitions(readPointBatch).reduce(add)
+# 160 seconds
+
+mle = np.linalg.solve(xtxy[0:P,0:P], xtxy[0:P,P])
+```
+
+### 1.4 Final comments
+
+#### Running a batch Spark job
+We can run a Spark job using Python code as a batch script rather than interactively. Here’s an example, which computes the value of ⇡ by Monte Carlo simulation (more on the general technique in the Unit on simulation). Assuming the script is named piCalc.py, we would call the script like this: spark-submit piCalc.py 100000000 1000
+
+
+This code again uses the idea that it’s computationally more efficient to have each operation occur on a batch of data rather than an individual data point. So there are 1000 tasks and the total number of samples is broken up amongst those tasks. In fact, Spark has problems if the number of tasks gets too large.
+
+```{python, eval=FALSE}
+import sys
+from pyspark import SparkContext
+from numpy import random as rand
+if __name__ == "__main__":
+    sc = SparkContext()
+    # use sys.argv to get arguments
+    # for example:
+    total_samples = int(sys.argv[1]) if len(sys.argv) > 1 else 1000000
+    num_slices = int(sys.argv[2]) if len(sys.argv) > 2 else 2
+    samples_per_slice = round(total_samples / num_slices)
+    def sample(p):
+        rand.seed(p)
+        x, y = rand.random(samples_per_slice), rand.random(samples_per_slice)
+        # x, y = rand.random(samples_per_slice), 
+        #   rand.random(samples_per_slice)
+        return sum(x*x + y*y < 1)
+
+    count = sc.parallelize(xrange(0, num_slices), num_slices).map(sample).reduce(lambda a, b: a + b)
+    #count = sc.parallelize(xrange(0, num_slices), num_slices).
+    # map(sample).reduce(lambda a, b: a + b)
+    print "Pi is roughly %f" % (4.0 * count / (num_slices*samples_per_slice))
+```
+
+
+
+#### Python vs. Scala/Java
+
+Spark is implemented natively in Java and Scala, so all calculations in Python involve taking Java data objects converting them to Python objects, doing the calculation, and then converting back to Java. This process is called serialization and takes time, so the speed when implementing your work in Scala (or Java) may be faster. Here’s a small bit of info on that.
+
+#### sparkR
+
+Finally, there is an R interface for Spark, but it’s pretty new and not as widely used, so I didn’t think it worth covering.
+

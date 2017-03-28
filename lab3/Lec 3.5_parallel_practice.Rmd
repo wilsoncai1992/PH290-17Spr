@@ -1,0 +1,876 @@
+---
+title: "Parallel R & Bash"
+author:
+- Wilson Cai, Department of Biostatistics, UC Berkeley
+- wcai@berkeley.edu
+date: "2016-03-10"
+output:
+  html_document:
+    toc: true
+    theme: journal
+    highlight: haddock
+---
+
+##I.	Parallel R hand-on: cross validation for SVM
+### SVM revisited
+
+### In-sample v.s. out-of-sample error
+
+![](./pic/test_error.png)
+
+Why lower training error is not always a good thing
+
+ESL Figure 2.11. Test and training error as a function of model complexity.
+
+### CV algorithm
+
+
+Data: airline (https://www.ocf.berkeley.edu/~wcai/share/airlines/AirlineDataAll.csv)
+
+**Scientific question:** use SVM to study the relationship between ArrDelay and DepDelay
+
+**Task:** Write your own CV function using parallelized loop
+
+### In-class practice
+
+```{r}
+# ===============================================================================================
+# Load and clean data
+# ===============================================================================================
+set.seed(290)
+library(dplyr)
+library(data.table)
+
+# AirlineDataAll <- fread("~/Desktop/Big data course/6_parallel_practice/data/AirlineDataAll.csv")
+AirlineDataAll <- fread("/Users/wilsoncai/Dropbox/@UCB/Courses/2016 Spring/Big data_Lexin/6_parallel_practice/data/AirlineDataAll.csv")
+# Slow! don't run
+# AirlineDataAll <- read.csv("~/Desktop/Big data course/6_parallel_practice/data/AirlineDataAll.csv")
+
+# Choose only records for US carrier
+AirlineDataAll <- subset(AirlineDataAll, UniqueCarrier == "US")
+
+# Turn variables into factor before fitting model
+AirlineDataAll <- as.data.frame(AirlineDataAll)
+AirlineDataAll$Cancelled <- AirlineDataAll$Cancelled %>% as.factor()
+AirlineDataAll$Dest <- AirlineDataAll$Dest %>% as.factor()
+AirlineDataAll <- subset(AirlineDataAll, !is.na(ArrDelay))
+AirlineDataAll <- subset(AirlineDataAll, !is.na(DepDelay))
+
+# Explore the variables of interest
+plot(ArrDelay~ DepDelay, data = AirlineDataAll, main = "Arrival Delay v.s. Departure Delay")
+```
+
+
+1. Set.seed(290)
+
+2. Split the data into 10 parts, each with 1/10 random subset of total observations.
+
+3. Exclude first part, use the rest 9 parts to fit a linear SVM.
+
+4. Fit linear SVM with para C = 0.5.
+
+5. How long does it take? Examine the runtime in a programmatic way
+
+6. Use the fitted SVM to perform prediction on the held-out test sample
+
+7. Calculate the root mean squared error (rmse) for the test sample
+
+8. Write a loop over step 2-7, each time hold out different part.
+
+9. Create a function do.cv for step 2 - 8, which takes input: (C), produces a vector of rmse output (total.rmse)
+
+10. Create a sequence of tuning parameter from 1 to 5, length of sequence = 5
+
+11. Repeat step 2-9 using the sequence of tuning parameters defined in step 10, store the mean squared error in a vector “mean.rmse” of length 5. Each element of “mean.rmse” is the mean of 10 rmse from a single CV
+
+12. Find the tuning parameter with the smallest CV error
+
+13. Rewrite the for loop with parallelized foreach loop.
+
+14. (optional) How can you do for polynomial kernel?
+
+
+
+##II.	Introduction to Bash Programming
+
+
+> **note**
+>
+> Some of the material in this tutorial was adapted from Chris
+> Paciorek's [2014 Statistics 243 lecture notes on
+> Bash](https://github.com/berkeley-stat243/stat243-fall-2014/blob/master/units/unit2-bash.pdf)
+> and his [2014 Statistics 243 lecture notes on using
+> R](https://github.com/berkeley-stat243/stat243-fall-2014/blob/master/units/unit4-usingR.pdf).
+>
+> Before reading this, you will want to be familiar with the material in
+> the "Basics of UNIX" tutorial and screencast here:
+> <http://statistics.berkeley.edu/computing/training/tutorials>
+
+### 1) The Interactive Shell
+
+The shell is an interactive computer programming environment. More
+specifically, it is a read-evaluate-print loop (REPL) environment. R and
+Python also provide REPL environments. A REPL reads a single
+*expression* or input, parses and *evaluates* it, *prints* the results,
+and then *loops*.
+
+> **note**
+>
+> I will use a `$` prompt for bash, a `>` prompt for R, and a `>>>` for
+> Python, and a `In [1]:` prompt for IPython. By convention, a regular
+> user's prompt in bash is `$`, while the root (or administrative)
+> user's prompt is `#`. However, it is common practice to never log on
+> as the root user. If you need to run a command with root privileges,
+> you should use the `sudo` command (see the *Getting started* section
+> below for more details).
+
+When you are working in a terminal window (i.e., a window with the
+command line interface), you're interacting with a shell. There are
+multiple shells (e.g., *sh*, *bash*, *csh*, *tcsh*, *zsh*, *fish*). I'll
+assume you are using *bash*, as this is the default for Mac OS X, the
+BCE VM, the SCF machines and most Linux distributions. However, the
+basic ideas are applicable to any Unix shell.
+
+The shell is an amazingly powerful programming environment. From it you
+can interactively monitor and control almost any aspect of the OS and
+more importantly you can automate it. As you will see, **bash** has a
+very extensive set of capabilities intended to make both interactive as
+well as automated control simple, effective, and customizable.
+
+> **note**
+>
+> It can be difficult to distinguish what is shell-specific and what is
+> just part of UNIX. Some of the material here is not bash-specific but
+> general to UNIX.
+>
+> Reference: Newham and Rosenblatt, Learning the bash Shell, 2nd ed.
+
+#### 1.1) Getting started
+
+I assume you already have access to a basic bash shell on a computer
+with network access. You should also have ssh installed. SSH provides an
+encrypted mechanism to connect to a remote Unix terminal. To learn more
+about using ssh to connect to the SCF machines and general tips about
+using ssh on various operating systems, see:
+<http://statistics.berkeley.edu/computing/ssh>
+
+To ssh to another machine, you need to know its (host)name. For example,
+to ssh to `scf-ug01.berkeley.edu`, one of the SCF machines, you would:
+
+    $ ssh scf-ug01.berkeley.edu
+    Password:
+
+At this point you have to type your password. Alternatively, you can set
+up ssh so that you can use it without typing your password. To learn how
+to set this up, see: <http://statistics.berkeley.edu/computing/ssh-keys>
+
+If you have a different username on SCF machines, you will need to
+specify it as well. For example, to specify the username `wcai`, you
+would:
+
+    $ ssh wcai@scf-ug01.berkeley.edu
+
+If you want to view graphical applications on your local computer that
+are running on the remote computer you need to use the `-X` option:
+
+    $ ssh -X wcai@scf-ug01.berkeley.edu
+
+Alternatively, if you want to copy a file (`file1.txt`) from your local
+computer to `scf-ug01.berkeley.edu`, you can use the `scp` command,
+which securely copies files between machines:
+
+    $ scp file1.txt wcai@scf-ug01.berkeley.edu:.
+
+The above command will copy `file1.txt` from my current working
+directory on my local machine to `wcai`'s home directory on
+`scf-ug01.berkeley.edu`. The `.` following the `:` indicates that I want
+to copy the file to my home directory on the remote machine. I could
+also replace `.` with any relative path from my home directory on the
+remote machine or I could use an absolute path.
+
+To copy a file (`file2.txt`) from `scf-ug01.berkeley.edu` to my local
+machine:
+
+    $ scp wcai@scf-ug01.berkeley.edu:file2.txt .
+
+I can even copy a file (`file3.txt`) owned by one user (`wcai`) on one
+remote machine `scf-ug01.berkeley.edu` to the account of another user
+(`wcai`) on another remote machine `scf-ug02.berkeley.edu`:
+
+    $ scp wcai@scf-ug01.berkeley.edu:file3.txt wcai@scf-ug01.berkeley.edu:.
+
+If instead of copying a single file, I wanted to copy an entire
+directory (`src`) from one machine to another, I would use the `-r`
+option:
+
+    $ scp -r src wcai@scf-ug01.berkeley.edu:.
+
+Regardless of whether you are working on a local computer or a remote
+one, it is occasionally useful to operate as a different user. For
+instance, you may need root (or administrative) access to change file
+permissions or install software.
+
+To upgrade all the software on your BCE machine:
+
+    $ sudo apt-get upgrade
+
+To install the text editor vim on a BCE machine:
+
+    $ sudo apt-get install vim
+
+> **tip**
+>
+> Most bash commands have electronic manual pages, which are accessible
+> directly from the commandline. You will be more efficient and
+> effective if you become accustomed to using these `man` pages. To view
+> the `man` page for the command `sudo`, for instance, you would type:
+>
+>     $ man sudo
+
+#### 1.2) Commands
+
+While each command has its own syntax, there are some rules usually
+followed. Generally, a command line consists of 4 things: a command,
+command options, arguments, and line acceptance. Consider the following
+example:
+
+    $ ls -l file.txt
+
+In the above example, `ls` is the command, `-l` is a command option
+specifying to use the long format, `file.txt` is the argument, and the
+line acceptance is indicated by hitting the `Enter` key at the end of
+the line.
+
+After you type a command at the bash prompt and indicate line acceptance
+with the `Enter` key, bash parses the command and then attempts to
+execute the command. To determine what to do, bash first checks whether
+the command is a shell function (we will discuss functions below). If
+not, it checks to see whether it is a builtin. Finally, if the command
+is not a shell function nor a builtin, bash uses the `PATH` variable.
+The `PATH` variable is a list of directories:
+
+    $ echo $PATH
+    /home/wcai/usr/bin:/usr/local/bin:/bin:/usr/bin:
+
+For example, consider the following command:
+
+    $ grep pdf file.txt
+
+We will discuss `grep` later. For now, let's ignore what `grep` actually
+does and focus on what bash would do when you press enter after typing
+the above command. First bash checks whether `grep` a shell function or
+a builtin. Once it determines that `grep` is neither a shell function
+nor a builtin, it will look for an executable file named `grep` first in
+`/home/wcai/usr/bin`, then in `/usr/local/bin`, and so on until it
+finds a match or runs out of places to look. You can use `which` to find
+out where bash would find it:
+
+    $ which grep
+    /bin/grep
+
+**Exercise**
+
+Consider the following examples using the `ls` command:
+
+    $ ls --all -l
+    $ ls -a -l
+    $ ls -al
+
+Use `man ls` to see what the command options do. Is there any difference
+in what the three versions of the command invocation above return as the
+result? What happens if you add a filename to the end of the command?
+
+##### 1.2.1) Tab completion
+
+When working in the shell, it is often unnecessary to type out an entire
+command or file name, because of a feature known as tab completion. When
+you are entering a command or filename in the shell, you can, at any
+time, hit the tab key, and the shell will try to figure out how to
+complete the name of the command or filename you are typing. If there is
+only one command in the search path and you're using tab completion with
+the first token of a line, then the shell will display its value and the
+cursor will be one space past the completed name. If there are multiple
+commands that match the partial name, the shell will display as much as
+it can. In this case, hitting tab twice will display a list of choices,
+and redisplay the partial command line for further editing. Similar
+behavior with regard to filenames occurs when tab completion is used on
+anything other than the first token of a command.
+
+> **note**
+
+> Note that R does tab completion for objects (including functions) and
+> filenames. While the default Python shell does not perform tab
+> completion, the IPython shell does.
+
+##### 1.2.2) Command History and Editing
+
+By using the up and down arrows, you can scroll through commands that
+you have entered previously. So if you want to rerun the same command,
+or fix a typo in a command you entered, just scroll up to it and hit
+enter to run it or edit the line and then hit enter.
+
+To list the history of the commands you entered, use the `history`
+command:
+
+    $ history
+      1    echo $PS1
+      2    PS1=$
+      3    bash
+      4    export PS1=$
+      5    bash
+      6    echo $PATH
+      7    which echo
+      8    ls --all -l
+      9    ls -a -l
+      10   ls -al
+      11   ls -al manual.xml
+
+The behavior of the `history` command is controlled by a shell
+variables:
+
+    $ echo $HISTFILE
+    $ echo $HISTSIZE
+
+You can also rerun previous commands as follows:
+
+    $ !-n
+    $ !gi
+
+The first example runs the nth previous command and the second one runs
+the last command that started with 'gi'.
+
+**Table. Command History Expansion**
+
+<table>
+<thead>
+<tr class="header">
+<th align="left">Designator</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>!!</code></td>
+<td align="left">Last command</td>
+</tr>
+<tr class="even">
+<td align="left"><code>!n</code></td>
+<td align="left">Command numbered <em>n</em> in the history</td>
+</tr>
+<tr class="odd">
+<td align="left"><code>!-n</code></td>
+<td align="left">Command <em>n</em> previous</td>
+</tr>
+<tr class="even">
+<td align="left"><code>!string</code></td>
+<td align="left">Last command starting with <em>string</em></td>
+</tr>
+<tr class="odd">
+<td align="left"><code>!?string</code></td>
+<td align="left">Last command containing <em>string</em></td>
+</tr>
+<tr class="even">
+<td align="left"><code>^string1^string2</code></td>
+<td align="left">Execute the previous command with <em>string2</em> substituted for <em>string1</em></td>
+</tr>
+</tbody>
+</table>
+
+If you're not sure what command you're going to recall, you can append
+`:p` at the end of the text you type to do the recall, and the result
+will be printed, but not executed. For example:
+
+    $ !gi:p
+
+You can then use the up arrow key to bring back that statement for
+editing or execution.
+
+You can also search for commands by doing `Ctrl-r` and typing a string
+of characters to search for in the search history. You can hit return to
+submit, `Ctrl-c` to get out, or `ESC` to put the result on the regular
+command line for editing.
+
+##### 1.2.3) Command Substitution
+
+You may occasionally need to substitute the results of a command for use
+by another command. For example, if you wanted to use the directory
+listing returned by `ls` as the argument to another command, you would
+type `$(ls)` in the location you want the result of `ls` to appear.
+
+An older notation for command substitution is to use backticks (e.g.,
+`` `ls ``\` versus `$(ls)`). It is generally preferable to use the new
+notation, since there are many annoyances with the backtick notation.
+For example, backslashes (`\`) inside of backticks behave in a
+non-intuitive way, nested quoting is more cumbersome inside backticks,
+nested substitution is more difficult inside of backticks, and it is
+easy to visually mistake backticks for a single quote.
+
+**Exercise**
+
+Try the following commands:
+
+    $ ls -l tr
+    $ which tr
+    $ ls -l which tr
+    $ ls -l $(which tr)
+
+Make sure you understand why each command behaves as it does.
+
+### 2) Basic File Management
+
+In Unix, almost "everything is a file." This means that a very wide
+variety of input and output resources (e.g., documents, directories,
+keyboards, harddrives, network devices) are streams of bytes available
+through the filesystem interface. This means that the basic file
+management tools are extremely powerful in Unix. Not only can you use
+these tools to work with files, but you can also use them to monitor and
+control many aspects of your computer.
+
+#### 2.1) Files
+
+A file typically consist of these attributes:
+
+-   Name.
+-   Type.
+-   Location.
+-   Size.
+-   Protection.
+-   Time, date, and user identification.
+
+
+
+Listing file attributes with `ls`:
+
+    $ ls -l
+
+Getting more information with `stat`:
+
+    $ stat manual.xml
+
+Finding out what type of file you have:
+
+    $ file manual.xml
+
+> **tip**
+>
+> The `file` command relies on many sources
+>
+> :   of information to determine what a file contains. The easiest part
+>     to explain is *magic*. Specifically, the `file` command examines
+>     the content of the file and compares it with information found in
+>     the `/usr/share/magic/` directory.
+>
+Changing file attributes with `chmod`:
+
+    $ chmod g+w manual.xml
+
+For more detailed information, please see the "Basics of UNIX" tutorial
+and screencast here:
+<http://statistics.berkeley.edu/computing/training/tutorials>
+
+#### 2.2) Navigation
+
+Efficient navigation of the filesystem from the shell is an essential
+aspect of mastering Unix. Use `pwd` to list your current working
+directory. If you just enter `cd` at a prompt, your current working
+directory will change to your home directory. You can also refer to your
+home directory using the tilde `~`. For example, if you wanted to change
+your current directory to the subdirectory `src` in your home directory
+from any other current directory, you could type:
+
+    $ cd ~/src
+
+Also if you want to return to the previous directory, you could type:
+
+    $ cd -
+
+You can use the pushd, popd, and dirs commands if you would like to keep
+a stack of previous working directories rather than just the last one.
+
+#### 2.3) Basic utilities
+
+Since files are such an essential aspect of Unix and working from the
+shell is the primary way to work with Unix, there are a large number of
+useful commands and tools to view and manipulate files.
+
+-   cat -- concatenate files and print on the standard output
+-   cp-- copy files and directories
+-   cut -- remove sections from each line of files
+-   diff-- find differences between two files
+-   grep -- print lines matching a pattern
+-   head -- output the first part of files
+-   find --  search for files in a directory hierarchy
+-   less -- opposite of more
+-   more --  file perusal filter for crt viewing
+-   mv -- move (rename) files
+-   nl -- number lines of files
+-   paste -- merge lines of files
+-   rm -- remove files or directories
+-   rmdir -- remove empty directories
+-   sort -- sort lines of text files.
+-   split -- split a file into pieces
+-   tac -- concatenate and print files in reverse
+-   tail -- output the last part of files
+-   touch -- change file timestamps
+-   tr -- translate or delete characters
+-   uniq --  remove duplicate lines from a sorted file
+-   wc --  print the number of bytes, words, and lines in files
+-   wget and `curl` -- non-interactive network downloader
+
+As we've already seen the general syntax for a Unix program is:
+
+    $ command -options argument1 argument2 ...
+
+For example, :
+
+    $ grep -i graphics file.txt
+
+looks for the literal string `graphics` (argument 1) in `file.txt`
+(argument2) with the option `-i`, which says to ignore the case of the
+letters. While :
+
+    $ less file.txt
+
+simply pages through a text file (you can navigate up and down) so you
+can get a feel for what's in it. To exit `less` type `q`.
+
+To find files by name, modification time, and type:
+
+    $ find . -name '*.txt'  # find files named *.txt
+    $ find . -mtime -2      # find files modified less than 2 days ago
+    $ find . -type l        # find links
+
+Unix programs often take options that are identified with a minus
+followed by a letter, followed by the specific option (adding a space
+before the specific option is fine). Options may also involve two
+dashes, e.g., `R --no-save`. A standard two dash option for many
+commands is `--help`. For example, try:
+
+    $ tail --help
+
+Here are a couple of examples of using the `tail` command:
+
+    $ wget https://raw.githubusercontent.com/berkeley-scf/tutorial-using-bash/master/cpds.csv
+    $ tail -n 10 cpds.csv   # last 10 lines of cpds.csv
+    $ tail -f cpds.csv      # shows end of file, continually refreshing
+
+The first line downloads the data from GitHub. The two main tools
+for downloading network accessible data from the commandline are `wget`
+and `curl`. I tend to use `wget` as my commandline downloading tool as
+it is more convenient.
+
+A few more tidbits about `grep` (we will see more examples of `grep` in
+the section on regular expressions, but it is so useful that it is worth
+seeing many times):
+
+    $ grep ^2001 cpds.csv   # returns lines that start with '2001'
+    $ grep 0$ cpds.csv      # returns lines that end with '0'
+    $ grep 19.0 cpds.csv    # returns lines with '19' separated from '0' by a single character
+    $ grep 19.*0 cpds.csv   # now separated by any number of characters
+    $ grep -o 19.0 cpds.csv # returns only the content matching the pattern from the relevant lines
+
+Note that the first argument to grep is the pattern you are looking for.
+The syntax is different from that used for wildcards in file names.
+Also, you can use regular expressions in the pattern. We won’t see this
+in detail here, but will discuss this in the section below on regular
+expressions.
+
+It is sometimes helpful to put the pattern inside double quotes, e.g.,
+if you want spaces in your pattern:
+
+    $ grep "George .* Bush" cpds.csv
+
+More generally in Unix, enclosing a string in quotes is often useful to
+indicate that it is a single argument/value.
+
+If you want to explicitly look for one of the special characters used in
+creating patterns (such as double quote (`"`), period (`.`), etc., you
+can "escape" them by preceding with a back-slash. For example to look
+for `"Canada"`, including the quotes:
+
+    $ grep "\"Canada\"" cpds.csv
+
+If you have a big data file and need to subset it by line (e.g., with
+`grep`) or by field (e.g., with `cut`), then you can do it really fast
+from the Unix command line, rather than reading it with R, SAS, Python,
+etc.
+
+Much of the power of these utilities comes in piping between them (see
+the next section) and using wildcards (see the section on Globbing) to
+operate on groups of files. The utilities can also be used in shell
+scripts to do more complicated things.
+
+We will look at several examples of how to use these utilities below,
+but first let's discuss streams and redirection.
+
+**Exercise**
+
+You've already seen some of the above commands. Follow the links above
+and while you are reading the abbreviated man pages consider how you
+might use these commands.
+
+#### 2.4) Streams, Pipes, and Redirects
+
+Unix programs that involve input and/or output often operate by reading
+input from a stream known as standard input (*stdin*), and writing their
+results to a stream known as standard output (*stdout*). In addition, a
+third stream known as standard error (*stderr*) receives error messages
+and other information that's not part of the program's results. In the
+usual interactive session, standard output and standard error default to
+your screen, and standard input defaults to your keyboard.
+
+You can change the place from which programs read and write through
+redirection. The shell provides this service, not the individual
+programs, so redirection will work for all programs. The following table
+shows some examples of redirection.
+
+**Table. Common Redirection Operators**
+
+<table>
+<thead>
+<tr class="header">
+<th align="left">Redirection Syntax</th>
+<th align="left">Function</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>$ cmd &gt; file</code></td>
+<td align="left">Send <em>stdout</em> to <em>file</em></td>
+</tr>
+<tr class="even">
+<td align="left"><code>$ cmd 1&gt; file</code></td>
+<td align="left">Same as above</td>
+</tr>
+<tr class="odd">
+<td align="left"><code>$ cmd 2&gt; file</code></td>
+<td align="left">Send <em>stderr</em> to <em>file</em></td>
+</tr>
+<tr class="even">
+<td align="left"><code>$ cmd &gt; file 2&gt;&amp;1</code></td>
+<td align="left">Send both <em>stdout</em> and <em>stderr</em> to <em>file</em></td>
+</tr>
+<tr class="odd">
+<td align="left"><code>$ cmd &lt; file</code></td>
+<td align="left">Receive <em>stdin</em> from <em>file</em></td>
+</tr>
+<tr class="even">
+<td align="left"><code>$ cmd &gt;&gt; file</code></td>
+<td align="left">Append <em>stdout</em> to <em>file</em>:</td>
+</tr>
+<tr class="odd">
+<td align="left"><code>$ cmd 1&gt;&gt; file</code></td>
+<td align="left">Same as above</td>
+</tr>
+<tr class="even">
+<td align="left"><code>$ cmd 2&gt;&gt; file</code></td>
+<td align="left">Append <em>stderr</em> to <em>file</em></td>
+</tr>
+<tr class="odd">
+<td align="left"><code>$ cmd &gt;&gt; file 2&gt;&amp;1</code></td>
+<td align="left">Append both <em>stdout</em> and <em>stderr</em> to <em>file</em></td>
+</tr>
+<tr class="even">
+<td align="left"><code>$ cmd1 | cmd2</code></td>
+<td align="left">Pipe <em>stdout</em> from <em>cmd1</em> to <em>cmd2</em></td>
+</tr>
+<tr class="odd">
+<td align="left"><code>$ cmd1 2&gt;&amp;1 | cmd2</code></td>
+<td align="left">Pipe <em>stdout</em> and <em>stderr</em> from <em>cmd1</em> to <em>cmd2</em></td>
+</tr>
+<tr class="even">
+<td align="left"><code>$ cmd1 tee file1 | cmd2</code></td>
+<td align="left">Pipe <em>stdout</em> and <em>cmd1</em> to <em>cmd2</em> while simultaneously writing it to <em>file1</em></td>
+</tr>
+<tr class="even">
+<td align="left"></td>
+<td align="left">using <em>tee</em></td>
+</tr>
+</tbody>
+</table>
+
+
+Note that `cmd` may include options and arguments as seen in the
+previous section.
+
+##### 2.4.1) Standard Redirection
+
+Operations where output from one command is used as input to another
+command (via the `|` operator) are known as pipes; they are made
+especially useful by the convention that many UNIX commands will accept
+their input through the standard input stream when no file name is
+provided to them.
+
+A simple pipe to `wc` to count the number of words in a string:
+
+    $ echo "hey there" | wc -w
+    2
+
+Translating lowercase to UPPERCASE with `tr`:
+
+    $ echo 'user1'  | tr 'a-z' 'A-Z'
+    USER1
+
+Here's an example of finding out how many unique entries there are in
+the 2nd column of a data file whose fields are separated by commas:
+
+    $ cut -d',' -f2 cpds.csv | sort | uniq | wc
+    $ cut -d',' -f2 cpds.csv | sort | uniq > countries.txt
+
+Above we use the `cut` utility to extract the second field (`-f2`) or
+column of the file `cpds.csv` where the fields (or columns) are split or
+delimited by a comma (`-d','`). The standard output of the `cut` command
+is then piped (via `|`) to the standard input of the `sort` command.
+Then the output of `sort` is sent to the input of `uniq` to remove
+duplicate entries in the sorted list provided by `sort`. Rather than
+using `sort | uniq`, you could also use `sort -u`. Finally, the first of
+the `cut` commands prints a word count summary using `wc`; while the
+second saving the sorted information with duplicates removed in the file
+`countries.txt`.
+
+To see if there are any "S" values in certain fields (fixed width) of a
+set of files (note I did this on 22,000 files (5 Gb or so) in about 5
+minutes on my desktop; it would have taken much more time to read the
+data into R):
+
+    $ cut -b29,37,45,53,61,69,77,85,93,101,109,117,125,133,141,149, \ 
+            157,165,173,181,189,197,205,213,221,229,237,245,253, \
+            261,269 USC*.dly | grep S | less
+
+A closely related, but subtly different, capability that we saw above is
+command substitution. Recall that when the shell encounters a command
+surrounded by `$()` (or backticks), it runs the command and replaces the
+expression with the output from the command; this allows something
+similar to a pipe, but is appropriate when a command reads its arguments
+directly from the command line instead of through standard input. For
+example, suppose we are interested in searching for the text `pdf` in
+the last 4 R code files (those with suffix `.r` or `.R`) that were
+modified in the current directory. We can find the names of the last 4
+files ending in `.R` or `.r` which were modified using:
+
+    $ ls -t *.{R,r} | head -4
+
+and we can search for the required pattern using `grep` (we will discuss
+`grep` again in the section on regular expressions). Putting these
+together with the backtick operator we can solve the problem using:
+
+    $ grep pdf $(ls -t *.{R,r} | head -4)
+
+Note that piping the output of the `ls` command into `grep` would not
+achieve the desired goal, since `grep` reads its filenames from the
+command line, not standard input.
+
+##III.	Bash Exercises
+
+1.  Figure out how to use the `mkdir` command to create the following
+    directory structure in one short command:
+
+        temp
+        ├── proj1
+        │   ├── code
+        │   └── data
+        ├── proj2
+        │   ├── code
+        │   └── data
+        └── proj3
+            ├── code
+            └── data
+
+2.  How would you count the number of lines in an input file, say AirlineDataAll.csv.
+3.  Print the first 100 lines of a file (AirlineDataAll.csv) to the screen. Now print just the 100-th line to the screen.
+4.  Put the 100-th line of a file in a new file.
+5.  Now add the 101-th line of the file to that same file from the
+    previous problem.
+
+6.	(Optional) Extract the SFO data from the AirlineDataAll.csv dataset and put it in a file called AirlineDataAll_SFO.csv. It's OK if you do this in a straightforward way and it might fail if 'SFO' is present in an unexpected column.
+
+
+
+
+##IV.	Rmarkdown tutorial
+
+### 0) This Tutorial
+
+This tutorial covers the basics of creating documents that combine code chunks, mathematical notation, and text. We'll cover R, Python and bash shell chunks in the context of documents written with LaTeX, Markdown, and Jupyter (formerly IPython Notebook).
+
+If you'd like to work on your own machine, you'll need to install the following:
+
+* a LaTeX installation such as MacTex (Mac) or MiKTeX (Windows)
+
+* R (and optionally RStudio)
+
+* the knitr and rmarkdown packages for R
+
+* Jupyter and the R kernel for Jupyter
+
+
+This tutorial assumes you are able to use the UNIX command line; we provide a tutorial on the [Basics of UNIX](http://statistics.berkeley.edu/computing/training/tutorials). This tutorial also assumes basic familiarity with LaTeX; more details on LaTeX are available in our [quick introduction to LaTeX tutorial](http://statistics.berkeley.edu/computing/training/tutorials).
+
+This is a pull-yourself-up-by-your-bootstraps tutorial as this document itself is generated from an R Markdown file in the same way as we discuss herein.
+
+To create this HTML document, simply compile the corresponding R Markdown file in R as follows (the following will work from within BCE after cloning the repository as above).
+```{r, build-html, eval = FALSE}
+Rscript -e "library(knitr); knit2html('dynamic-docs.Rmd')"
+```
+
+### 1) Overview
+
+In the following sections, we'll present example source files in each of the formats covered in this tutorial, and we'll show how to create PDF and HTML files from each source document. Each example file covers the same material, showing basic use of equations and code chunks in R, Python, and bash. In addition, there are tips on formatting code to avoid output that exceeds the width of a page, which is a common problem when generating PDFs.
+
+In general, processing the input file to create an output file involves evaluating the code chunks and creating an intermediate document in which the results of the evaluation are written out (e.g., in standard Markdown or LaTeX syntax), from which the final step is to create the output in the usual way from the intermediate document. Note that these steps take place behind the scenes without you needing to know the details.
+
+### 2) R Markdown
+
+R Markdown is a variant on the Markdown markup language that allows you to embed code chunks that are evaluated before creating the final output, unlike standard static code chunks in Markdown that are not evaluated. R Markdown files are simple text files.
+
+In *demo.Rmd* you'll see examples of embedding R, Python, and bash code chunks, as ell as the syntax involved in creating PDF, HTML, and Word output files.
+
+### 3) LaTeX plus knitr
+
+*knitr* is an R package that allows you to process LaTeX files that contain code chunks. The input files can be in one of two formats, either traditional Sweave files (with extension .Rnw) or a new format introduced by knitr (with extension .Rtex). Files in either format are simple text files.
+
+*demo.Rnw* and *demo.Rtex* provide examples of these formats, with examples of embedding R, Python, and bash code chunks.  In both *demo.Rnw* and *demo.Rtex* you'll also see the syntax for creating PDF output files.
+
+### 4) LyX plus knitr
+
+You can embed code chunks in the Sweave format in LyX files and then process the file using knitr to create PDF output. *demo.lyx* provides an example, including the syntax for creating PDF output files. To use LyX, you'll need to start the LyX application and open an existing or create a new LyX file.
+
+### 5) Jupyter
+
+Jupyter grew out of the IPython Notebook project and provides a general way of embedding code chunks, using a variety of languages, within a document where the textual component of the document is written in Markdown. Basically a document is a sequence of chunks, where each chunk is either a code chunk or a Markdown chunk.
+
+To work with a Jupyter notebook, you start Jupyter by running `ipython notebook`from the UNIX command line. This will open up a Jupyter interface in a browser window. From there, you can navigate to and open your notebook file (which will end in extension .ipynb). You can choose the kernel (i.e., the language for the code chunks -- Python, R, etc.) by selecting `Kernel -> Change Kernel` or by selecting the kernel you want when opening a new notebook.
+
+The Jupyter files have some similarities to *demo.Rmd* as both R Markdown and Jupyter rely on Markdown as the format for text input. However, they handle code chunks somewhat differently.
+
+Jupyter does not allow one to insert chunks from multiple languages in the same document, so here we have demo files for inserting R chunks (*demo-R.ipynb*), bash chunks (*demo-bash.ipynb*), and Python chunks (*demo-python.ipynb*). All include instructions for generating HTML output.
+
+To use the bash kernel, you will need to do some additional installation. In particular, in BCE please run the relevant commands in *bce.sh*.
+
+
+
+##V.	Rmarkdown Exercises
+
+1.	As preparation for future problem sets, this problem explores embedding R code and output in a PDF or HTML document.
+Here is some R code that creates a plot and prints some output to the screen.
+
+```{r, fig.height=4, fig.width=2.75}
+hist(LakeHuron)
+lowHi <- c(which.min(LakeHuron), which.max(LakeHuron))
+yearExtrema <- attributes(LakeHuron)$tsp[1]-1 + lowHi
+```
+
+Your task in this problem is to produce a single-page of PDF that looks like knitr.pdf on bcourse, using either the `knitr` package in R with latex or R Markdown.
+
+Requirements for your solution:
+
+(a)  Your solution should consist of the latex+`knitr` or R Markdown syntax that produces the PDF, where the syntax embeds the necessary R code.
+
+(b)  Your resulting PDF output should look like the last page of the PDF of this assignment (it does not have to be exactly the same in terms of formatting and the actual prefacing text), which I created using latex+`knitr`.
+
+(c)  Your resulting PDF document should be less than a page and your figure should be small enough that it only takes up half the width of the page (the fig.width argument may be helpful).
+
+(d)  In your solution, you should NOT manually type ‘1875’ or ‘1972’ in your document, rather embed an R expression that returns ’1875’ and ’1972’ using `\rinline` or the equivalent for R Markdown.
+
+The tutorial on dynamic documents provides information and example/template files that you can make use of to create your latex/knitr` or R Markdown file. Ask us questions if you get stuck - this question is just intended to ensure that you are up to speed on how to deal with formatting for future problem sets.
+
